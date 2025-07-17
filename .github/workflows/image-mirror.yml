@@ -79,7 +79,8 @@ jobs:
             Syncing image to TargetRegistry, please wait a moment...
             [Check the progress](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           reactions: rocket
-          edit-mode: ${{ steps.fc.outputs.comment-id && 'replace' || 'create' }}
+          # **【已修复】** 始终使用 replace。在创建新评论时，此参数会被忽略。
+          edit-mode: replace
           
       - name: Prepare tools
         run: |
@@ -110,6 +111,7 @@ jobs:
 
       - name: Prepare content for success comment
         id: get-comment-body
+        if: success()
         run: |
           target_images=$(cat dockerhub-image.yml)
           target_images="${target_images//'%'/'%25'}"
