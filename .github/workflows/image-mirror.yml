@@ -24,7 +24,7 @@ jobs:
       - name: 1. Checkout code
         uses: actions/checkout@v4
 
-      # 将所有文本处理和验证逻辑整合到一个步骤中，避免多次调用 sed/awk/dos2unix
+      # 将所有文本处理和验证逻辑整合到一个步骤中
       - name: 2. Validate and Parse Issue Body
         id: parse_issue
         run: |
@@ -88,7 +88,6 @@ jobs:
             镜像列表已解析，正在准备同步。
             [点击查看实时进度](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           reactions: rocket
-          # 此处直接创建/更新评论，并获取其 ID，用于后续更新
           
       - name: Update Issue Title and Labels
         if: steps.parse_issue.outputs.is_image_format == 'true'
@@ -110,7 +109,7 @@ jobs:
               labels: ['image-mirror']
             });
 
-      # 缓存 image-syncer，避免每次都重新下载
+      # 缓存 image-syncer
       - name: Cache image-syncer
         if: steps.parse_issue.outputs.is_image_format == 'true'
         id: cache-syncer
@@ -139,8 +138,8 @@ jobs:
           echo "----------------------"
           ./image-syncer --auth=./auth.yml --images=./images.yml
 
-      # 成功后，更新评论并添加 "succeed" 标签
-      - name: Handle Success
+      # 成功后，更新最终评论
+      - name: Handle Success Comment
         if: success() && steps.parse_issue.outputs.is_image_format == 'true'
         uses: peter-evans/create-or-update-comment@v4
         with:
@@ -148,24 +147,45 @@ jobs:
           edit-mode: replace
           body: |
             ✅ **镜像同步成功**
+            所有镜像已成功同步，此 issue 将被自动关闭。
             [点击查看执行日志](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
             #### 源镜像
             ```yaml
-            $(cat images-init.yml)
+            ${{ steps.parse_issue.outputs.source_images_for_comment }}
             ```
 
             #### 目标镜像
             ```yaml
-            $(cat dockerhub-image.yml)
+            ${{ steps.parse_issue.outputs.target_images_for_comment }}
             ```
           reactions: hooray
 
-      - name: Add 'succeed' Label
+      - name: Add 'succeed' Label and Close Issue
         if: success() && steps.parse_issue.outputs.is_image_format == 'true'
-        uses: actions-ecosystem/action-add-labels@v1
+        uses: actions/github-script@v7
         with:
-          labels: succeed
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue_number = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // 添加 'succeed' 标签
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: ['succeed']
+            });
+
+            // 关闭 issue
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number,
+              state: 'closed'
+            });
 
       # 失败后，更新评论
       - name: Handle Failure
