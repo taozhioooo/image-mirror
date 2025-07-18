@@ -191,7 +191,7 @@ jobs:
             ## 镜像信息
             - **拉取镜像**
             ```shell
-            ${{ steps.get-comment-body.outputs.dockerhubImage }}
+            docker pull ${{ steps.get-comment-body.outputs.dockerhubImage }}
             ```
             
             - **拉取并替换**
@@ -199,11 +199,7 @@ jobs:
             ```shell
             ${{ steps.generate_revert_script.outputs.revert_script }}
             ```
-            
-            - **源镜像**
-            ```shell
-            ${{ steps.get-comment-body.outputs.sourceImage }}
-            ```
+          
           reactions: hooray
           edit-mode: replace
 
@@ -217,7 +213,6 @@ jobs:
             ❌ 镜像同步失败，请检查以下几点：
             - 源镜像名称和 tag 是否存在且正确？
             - 该镜像是公开的吗？
-            - 如果指定了 `--arch`，架构名称是否正确？
             - 查看日志获取详细错误信息：[Workflow Logs](https://github.com/${{ github.repository_owner }}/image-mirror/actions/runs/${{ github.run_id }})
           reactions: confused
 
