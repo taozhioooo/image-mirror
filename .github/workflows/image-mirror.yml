@@ -23,32 +23,7 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v2
 
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: '3.x'
-
-      - name: Check issue body for image format
-        id: check_body
-        run: |
-          python .github/scripts/check_image_format.py "${{ github.event.issue.body }}"
-
-      - name: Add comment if body is not image format
-        if: steps.check_body.outputs.is_image_format == 'false'
-        uses: peter-evans/create-or-update-comment@v2
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          body: |
-            @${{ github.event.issue.user.login }}
-            !!!请使用标准镜像格式
-            1. 镜像要带tag,如nginx,请写为nginx:latest --arch=linux/amd64,linux/arm64/v8
-            2. 标题不重要,issue描述部分,每行一个镜像不要有其他内容,你可以直接更新你的issue
-            3. 不带--arch参数默认同步所有架构镜像
-          reactions: hooray
-          edit-mode: replace
-
       - name: Update issue title with image summary
-        if: steps.check_body.outputs.is_image_format == 'true'
         uses: actions/github-script@v5
         with:
           script: |
@@ -56,44 +31,51 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const body = context.payload.issue.body;
-            const lines = body.split(/\r?\n/).map(line => line.trim().replace(/\s--arch.*/, '')).filter(Boolean);
-            const images = lines.slice(1);
-            const top3 = images.slice(0, 3).join(' | ');
-            const total = images.length;
-            const newTitle = `${top3}  (共 ${total} 个镜像)`;
-            await github.rest.issues.update({
-              owner,
-              repo,
-              issue_number,
-              title: newTitle
-            });
+            // 提取所有看起来像镜像的行 (包含冒号，并且清理--arch)
+            const image_lines = body.split(/\r?\n/).map(line => line.trim().replace(/\s--arch.*/, '')).filter(line => line.includes(':'));
+            if (image_lines.length > 0) {
+              const top3 = image_lines.slice(0, 3).join(' | ');
+              const total = image_lines.length;
+              const newTitle = `${top3}  (共 ${total} 个镜像)`;
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number,
+                title: newTitle
+              });
+            }
 
-      - name: Add image-mirror label if body is image format
-        if: steps.check_body.outputs.is_image_format == 'true'
+      - name: Add image-mirror label
         uses: actions-ecosystem/action-add-labels@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           labels: 'image-mirror'
 
-      - name: Create comment
-        if: ${{ steps.check_body.outputs.is_image_format == 'true' && steps.fc.outputs.comment-id == '' }}
+      - name: Find Comment
+        uses: peter-evans/find-comment@v2
+        id: fc
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: Syncing image to TargetRegistry
+
+      - name: Create initial comment
+        if: steps.fc.outputs.comment-id == ''
         uses: peter-evans/create-or-update-comment@v2
         with:
           issue-number: ${{ github.event.issue.number }}
           body: |
-            Syncing image to TargetRegistry, please wait a moment
+            Syncing image to TargetRegistry, please wait a moment...
             [Check the progress](https://github.com/${{ github.repository_owner }}/image-mirror/actions/runs/${{ github.run_id }})
           reactions: rocket
 
-      - name: prepare
-        if: steps.check_body.outputs.is_image_format == 'true'
+      - name: Prepare tools
         run: |
           wget -q https://github.com/AliyunContainerService/image-syncer/releases/download/v1.5.4/image-syncer-v1.5.4-linux-amd64.tar.gz
           tar zxf image-syncer-v1.5.4-linux-amd64.tar.gz
-          sudo apt install dos2unix
+          sudo apt-get update && sudo apt-get install -y dos2unix
 
-      - name: start sync
-        if: steps.check_body.outputs.is_image_format == 'true'
+      - name: Parse issue and Start Sync
         id: syncImage
         env:
           TARGET_REGISTRY_PASSWORD: ${{ secrets.TARGET_REGISTRY_PASSWORD }}
@@ -101,49 +83,48 @@ jobs:
           TARGET_NAMESPACE: ${{ vars.TARGET_NAMESPACE }}
           TARGET_REGISTRY: ${{ vars.TARGET_REGISTRY }}
         run: |
-          # 将原始 issue body 写入文件，用于后续处理和评论
+          # 1. 准备原始数据和清理
           echo "${{ github.event.issue.body }}" > images-original-for-comment.yml
-          cp images-original-for-comment.yml images-to-process.yml
-          dos2unix images-to-process.yml
+          dos2unix images-original-for-comment.yml
+          > images.yml
+          > dockerhub-image.yml
 
-          # 检查 issue body 中是否存在 --arch 参数
+          # 2. 查找全局 --arch 参数
           ARCH_INFO="all"
           SYNC_COMMAND="./image-syncer --auth=./auth.yml --images=./images.yml"
-
-          # 从第二行开始，查找第一个--arch标志
-          ARCH_LINE=$(grep -m 1 -- '--arch' <(tail -n +2 images-to-process.yml) || echo "")
+          ARCH_LINE=$(grep -m 1 -- '--arch' images-original-for-comment.yml || echo "")
 
           if [[ -n "$ARCH_LINE" ]]; then
-            # 如果找到，提取架构值
             ARCH_VALUE=$(echo "$ARCH_LINE" | awk -F'--arch' '{print $2}' | xargs)
             if [[ -n "$ARCH_VALUE" ]]; then
                 ARCH_INFO="$ARCH_VALUE"
-                SYNC_COMMAND="./image-syncer --auth=./auth.yml --images=./images.yml --arch=\"$ARCH_INFO\""
+                # 在命令中为arch参数值加上引号以处理逗号
+                SYNC_COMMAND="./image-syncer --auth=./auth.yml --images=./images.yml --arch '$ARCH_INFO'"
                 echo "Architecture specified: $ARCH_INFO. This will be applied to ALL images in this issue."
-            else
-                echo "Found '--arch' flag but with no value. Syncing all available architectures."
             fi
-          else
-            echo "No architecture specified. Syncing all available architectures."
           fi
+          echo "::set-output name=arch_synced::$ARCH_INFO"
 
-          # 清理 images-to-process.yml 文件，移除 --arch 及其后的所有内容，为生成镜像列表做准备
-          sed -i 's/--arch.*//g'      images-to-process.yml
-          sed -i 's/^[ \t]*//g'       images-to-process.yml
-          sed -i 's/[ \t]*$//g'       images-to-process.yml
-          sed -i '/^[[:space:]]*$/d'  images-to-process.yml
+          # 3. 逐行解析issue body，生成配置文件
+          IMAGE_COUNT=0
+          while IFS= read -r line; do
+            # 移除--arch参数和首尾空格
+            image_name=$(echo "$line" | sed -e 's/--arch.*//g' -e 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-          # 从清理后的文件中提取镜像列表（跳过第一行），并生成 images.yml 和 dockerhub-image.yml
-          img=$(tail -n +2 images-to-process.yml)
-          for i in ${img[@]}; do
-            if [ -z "$i" ]; then continue; fi
-            tagName=$(echo $i | awk -F "/" '{print $NF}')
-            echo "$i: ${TARGET_REGISTRY}/${TARGET_NAMESPACE}/${tagName}" >> images.yml
+            # 跳过空行或不含':'的无效行 (核心容错逻辑)
+            if [[ -z "$image_name" || ! "$image_name" == *":"* ]]; then
+                continue
+            fi
+
+            IMAGE_COUNT=$((IMAGE_COUNT + 1))
+            tagName=$(echo "$image_name" | awk -F "/" '{print $NF}')
+            echo "$image_name: ${TARGET_REGISTRY}/${TARGET_NAMESPACE}/${tagName}" >> images.yml
             echo "${TARGET_REGISTRY}/${TARGET_NAMESPACE}/${tagName}" >> dockerhub-image.yml
-          done
+          done < images-original-for-comment.yml
 
-          if [ ! -s images.yml ]; then
-            echo "::error::No valid image names found after processing. Aborting sync."
+          # 4. 如果没有找到任何有效镜像，则报错退出
+          if [ "$IMAGE_COUNT" -eq 0 ]; then
+            echo "::error::No valid image definitions found in the issue body. Please ensure each image is on a new line and includes a tag (e.g., 'nginx:latest')."
             exit 1
           fi
 
@@ -151,26 +132,21 @@ jobs:
           cat images.yml
           echo "--- Running command: $SYNC_COMMAND ---"
 
-          # 执行同步命令
+          # 5. 执行同步
           eval $SYNC_COMMAND
 
-          # 设置输出，供后续步骤使用
-          echo "::set-output name=arch_synced::$ARCH_INFO"
-
       - name: Add Success Label and Close Issue
-        if: ${{ success() && steps.check_body.outputs.is_image_format == 'true' }}
+        if: success()
         uses: actions/github-script@v5
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
-            // 添加 succeed 标签
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               labels: ['succeed']
             });
-            // 关闭 issue
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -179,40 +155,29 @@ jobs:
             });
 
       - id: get-comment-body
-        if: steps.check_body.outputs.is_image_format == 'true'
+        if: success()
         run: |
           dockerhubImage="$(cat dockerhub-image.yml)"
           dockerhubImage="${dockerhubImage//'%'/'%25'}"
           dockerhubImage="${dockerhubImage//$'\n'/'%0A'}"
           dockerhubImage="${dockerhubImage//$'\r'/'%0D'}"
           echo "::set-output name=dockerhubImage::$dockerhubImage"
-
-          # 使用原始的 issue body 内容（包含--arch）来生成评论
           sourceImage="$(cat images-original-for-comment.yml)"
           sourceImage="${sourceImage//'%'/'%25'}"
           sourceImage="${sourceImage//$'\n'/'%0A'}"
           sourceImage="${sourceImage//$'\r'/'%0D'}"
           echo "::set-output name=sourceImage::$sourceImage"
 
-      - name: Find Comment
-        if: steps.check_body.outputs.is_image_format == 'true'
-        uses: peter-evans/find-comment@v2
-        id: fc
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: Syncing image to TargetRegistry
-
-      - name: Add Tips
-        if: ${{ success() && steps.check_body.outputs.is_image_format == 'true' }}
+      - name: Update comment on Success
+        if: success()
         uses: peter-evans/create-or-update-comment@v2
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           issue-number: ${{ github.event.issue.number }}
           body: |
-            [Check the progress](https://github.com/${{ github.repository_owner }}/image-mirror/actions/runs/${{ github.run_id }})
+            ✅ Sync succeeded. [Check the logs here](https://github.com/${{ github.repository_owner }}/image-mirror/actions/runs/${{ github.run_id }})
             **Synced Architectures:** `${{ steps.syncImage.outputs.arch_synced }}`
-            ## 镜像信息如下
+            ## 镜像信息
             - **目标镜像 (Target Images)**
             ```shell
             ${{ steps.get-comment-body.outputs.dockerhubImage }}
@@ -224,25 +189,22 @@ jobs:
           reactions: hooray
           edit-mode: replace
 
-      - name: Add failure hint comment
-        if: failure() && steps.check_body.outputs.is_image_format == 'true'
+      - name: Update comment on Failure
+        if: failure() || cancelled()
         uses: peter-evans/create-or-update-comment@v2
         with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
           issue-number: ${{ github.event.issue.number }}
           body: |
             ❌ 镜像同步失败，请检查以下几点：
-            - 源镜像是否拼写错误？
-            - tag 是否存在（如 `latest`、`1.21`）？
-            - 该镜像是否为公开可拉取的镜像？
-            - 若指定架构 (`--arch`)，语法是否正确？ (例如 `--arch linux/amd64,linux/arm64`)
-            - 若为私有镜像，请确认目标 registry 有访问权限
-
-            可参考 logs：
-            [查看工作详情](https://github.com/${{ github.repository_owner }}/image-mirror/actions/runs/${{ github.run_id }})
+            - 源镜像名称和 tag 是否存在且正确？
+            - 该镜像是公开的吗？
+            - 如果指定了 `--arch`，架构名称是否正确？
+            - 查看日志获取详细错误信息：[Workflow Logs](https://github.com/${{ github.repository_owner }}/image-mirror/actions/runs/${{ github.run_id }})
           reactions: confused
 
       - name: Add Failed Label
-        if: failure() && steps.check_body.outputs.is_image_format == 'true'
+        if: failure() || cancelled()
         uses: actions/github-script@v5
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
