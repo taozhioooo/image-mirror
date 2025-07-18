@@ -29,7 +29,7 @@ jobs:
         id: parse_issue
         run: |
           # 从 issue body 的第二行开始读取，并清理空行和回车符
-          SOURCE_IMAGES=$(echo "${{ github.event.issue.body }}" | tail -n +2 | tr -d '\r' | sed '/^$/d')
+          SOURCE_IMAGES=$(echo "${{ github.event.issue.body }}" | tr -d '\r' | sed '/^$/d')
 
           # 简单的格式验证，检查每行是否包含 ":"
           IS_VALID='true'
