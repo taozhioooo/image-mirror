@@ -189,16 +189,18 @@ jobs:
             ✅ Sync succeeded. [Check the logs here](https://github.com/${{ github.repository_owner }}/image-mirror/actions/runs/${{ github.run_id }})
             **Synced Architectures:** `${{ steps.syncImage.outputs.arch_synced }}`
             ## 镜像信息
-            - **拉取镜像 (Target Images)**
+            - **拉取镜像**
             ```shell
             ${{ steps.get-comment-body.outputs.dockerhubImage }}
             ```
+            
             - **拉取并替换**
             如果需要将本地的镜像从“目标名”还原为“源名”，可以运行下面的脚本：
             ```shell
             ${{ steps.generate_revert_script.outputs.revert_script }}
             ```
-            - **源镜像 (Source from Issue)**
+            
+            - **源镜像**
             ```shell
             ${{ steps.get-comment-body.outputs.sourceImage }}
             ```
